@@ -5,7 +5,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import aiohttp
 from dotenv import load_dotenv
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Load environment variables
@@ -64,6 +64,9 @@ class CFBot(commands.Bot):
         print(f'[LOG] Logged in as {self.user} (ID: {self.user.id})')
         print('------')
 
+    async def on_app_command_completion(self, interaction: discord.Interaction, command: discord.app_commands.Command):
+        print(f"[LOG] Command Used: `/{command.name}` by {interaction.user} (ID: {interaction.user.id}) in channel {interaction.channel_id}")
+
     async def daily_question_job(self):
         """Post a random problem to a designated channel."""
         for guild in self.guilds:
@@ -104,7 +107,7 @@ class CFBot(commands.Bot):
     async def submission_poller(self):
         """Background task to check if users have solved their assigned problems."""
         print("[LOG] Polling for solved problems...")
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         # 1. Check Practice Sessions
         async for session in self.db.active_sessions.find({"status": "pending"}):
@@ -179,9 +182,9 @@ class CFBot(commands.Bot):
         history_entry = {
             "user_id": session['user_id'],
             "problem_id": session['problem_id'],
-            "solved_at": datetime.utcnow(),
+            "solved_at": datetime.now(timezone.utc),
             "attempts": attempts,
-            "time_taken_seconds": (datetime.utcnow() - session['start_time']).total_seconds()
+            "time_taken_seconds": (datetime.now(timezone.utc) - session['start_time']).total_seconds()
         }
         await self.db.user_history.insert_one(history_entry)
 
@@ -189,7 +192,7 @@ class CFBot(commands.Bot):
         await self.db.active_sessions.delete_one({"_id": session['_id']})
 
         start_time = session['start_time']
-        duration = datetime.utcnow() - start_time
+        duration = datetime.now(timezone.utc) - start_time
         hours, remainder = divmod(int(duration.total_seconds()), 3600)
         minutes, seconds = divmod(remainder, 60)
         channel = self.get_channel(session['channel_id'])
@@ -207,7 +210,7 @@ class CFBot(commands.Bot):
             "type": contest['type'],
             "problems": contest['problems'],
             "participants": updated_contest['participants'],
-            "finished_at": datetime.utcnow()
+            "finished_at": datetime.now(timezone.utc)
         })
         await self.db.contests.delete_one({"_id": contest['_id']})
         channel = self.get_channel(contest['channel_id'])
@@ -240,6 +243,7 @@ async def fetch_cf_api(endpoint, params=None):
 @bot.tree.command(name="register", description="Register your Codeforces handle")
 async def register(interaction: discord.Interaction, handle: str):
     await interaction.response.defer()
+    print(f"[LOG] User {interaction.user} attempting to register handle: {handle}")
     res = await fetch_cf_api("user.info", {"handles": handle})
     if "error" in res:
         await interaction.followup.send(f"❌ Error: {res['error']}")
@@ -256,30 +260,48 @@ async def register(interaction: discord.Interaction, handle: str):
     )
     await interaction.followup.send(f"✅ Registered successfully! Your handle: **{cf_handle}**")
 
-@bot.tree.command(name="profile", description="View your Codeforces profile")
-async def profile(interaction: discord.Interaction):
+@bot.tree.command(name="ping", description="Check the bot's latency")
+async def ping(interaction: discord.Interaction):
+    await interaction.response.send_message(f"🏓 Pong! Latency: `{round(bot.latency * 1000)}ms`")
+
+@bot.tree.command(name="profile", description="View a Codeforces profile")
+async def profile(interaction: discord.Interaction, user: discord.Member = None):
     await interaction.response.defer()
-    user = await bot.db.users.find_one({"discord_id": interaction.user.id})
-    if not user:
-        await interaction.followup.send("❌ You are not registered. Use `/register <handle>` first.")
+
+    # If no user is specified, use the person who called the command
+    target_user = user if user else interaction.user
+
+    db_user = await bot.db.users.find_one({"discord_id": target_user.id})
+    if not db_user:
+        if target_user == interaction.user:
+            await interaction.followup.send("❌ You are not registered. Use `/register <handle>` first.")
+        else:
+            await interaction.followup.send(f"❌ {target_user.display_name} is not registered with the bot.")
         return
-    handle = user['cf_handle']
+
+    handle = db_user['cf_handle']
     res = await fetch_cf_api("user.info", {"handles": handle})
     if "error" in res or not res:
         await interaction.followup.send("❌ Could not fetch profile from Codeforces.")
         return
+
     data = res[0]
     rating = data.get('rating', 'Unrated')
     rank = data.get('rank', 'No Rank')
+
     embed = discord.Embed(title=f"Codeforces Profile: {handle}", color=discord.Color.blue())
     embed.add_field(name="Rating", value=str(rating), inline=True)
     embed.add_field(name="Rank", value=str(rank), inline=True)
     embed.set_thumbnail(url=data.get('imageUrl'))
+    embed.set_footer(text=f"Requested by {interaction.user.display_name}")
+
     await interaction.followup.send(embed=embed)
+
 
 @bot.tree.command(name="randomquestion", description="Get a random Codeforces problem to solve")
 async def randomquestion(interaction: discord.Interaction, min_rating: int = 800, max_rating: int = 1200):
     await interaction.response.defer()
+    print(f"[LOG] User {interaction.user} requested random question ({min_rating}-{max_rating})")
     user = await bot.db.users.find_one({"discord_id": interaction.user.id})
     if not user:
         await interaction.followup.send("❌ You must `/register` first!")
@@ -298,7 +320,7 @@ async def randomquestion(interaction: discord.Interaction, min_rating: int = 800
     pid = f"{cid}-{idx}"
     await bot.db.active_sessions.update_one(
         {"user_id": interaction.user.id},
-        {"$set": {"problem_id": pid, "start_time": datetime.utcnow(), "status": "pending", "channel_id": interaction.channel_id}},
+        {"$set": {"problem_id": pid, "start_time": datetime.now(timezone.utc), "status": "pending", "channel_id": interaction.channel_id}},
         upsert=True
     )
     await interaction.followup.send(f"🎯 **Your Problem:**\nRating: `{prob['rating']}`\nLink: https://codeforces.com/problemset/problem/{cid}/{idx}\n\nI'll notify the group once you solve it!")
@@ -306,6 +328,10 @@ async def randomquestion(interaction: discord.Interaction, min_rating: int = 800
 @bot.tree.command(name="check", description="Manually check if you have solved your assigned problem")
 async def check(interaction: discord.Interaction):
     await interaction.response.defer()
+    user = await bot.db.users.find_one({"discord_id": interaction.user.id})
+    if not user:
+        await interaction.followup.send("❌ You must be registered first! Use `/register <handle>` to link your Codeforces account.")
+        return
     session = await bot.db.active_sessions.find_one({"user_id": interaction.user.id})
     if not session:
         await interaction.followup.send("❌ You don't have an active problem.")
@@ -331,7 +357,11 @@ async def check(interaction: discord.Interaction):
 
 @bot.tree.command(name="skip", description="Give up on the current problem and clear your session")
 async def skip(interaction: discord.Interaction):
-    await interaction.//db.active_sessions.find_one({"user_id": interaction.user.id})
+    await interaction.response.defer()
+    user = await bot.db.users.find_one({"discord_id": interaction.user.id})
+    if not user:
+        await interaction.followup.send("❌ You must be registered first! Use `/register <handle>` to link your Codeforces account.")
+        return
     # Correction: Use bot.db
     session = await bot.db.active_sessions.find_one({"user_id": interaction.user.id})
     if not session:
@@ -346,6 +376,7 @@ async def skip(interaction: discord.Interaction):
 @bot.tree.command(name="challenge", description="Challenge a user to a 1v1 Duel")
 async def challenge(interaction: discord.Interaction, opponent: discord.Member, num_probs: int = 3, duration_mins: int = 60):
     await interaction.response.defer()
+    print(f"[LOG] {interaction.user} challenged {opponent} to a duel")
     if opponent == interaction.user:
         await interaction.followup.send("❌ You cannot challenge yourself!")
         return
@@ -364,7 +395,7 @@ async def challenge(interaction: discord.Interaction, opponent: discord.Member, 
         return
     selected = sorted(random.sample(filtered, num_probs), key=lambda x: x['rating'])
     prob_ids = [f"{p['contestId']}-{p['index']}" for p in selected]
-    contest_id = f"duel_{interaction.user.id}_{opponent.id}_{int(datetime.utcnow().timestamp())}"
+    contest_id = f"duel_{interaction.user.id}_{opponent.id}_{int(datetime.now(timezone.utc).timestamp())}"
     await bot.db.contests.update_one(
         {"contest_id": contest_id},
         {"$set": {
@@ -400,7 +431,7 @@ async def createcontest(interaction: discord.Interaction, num_probs: int = 3, du
         return
     selected = sorted(random.sample(filtered, num_probs), key=lambda x: x['rating'])
     prob_ids = [f"{p['contestId']}-{p['index']}" for p in selected]
-    contest_id = f"contest_{interaction.user.id}_{int(datetime.utcnow().timestamp())}"
+    contest_id = f"contest_{interaction.user.id}_{int(datetime.now(timezone.utc).timestamp())}"
     await bot.db.contests.update_one(
         {"contest_id": contest_id},
         {"$set": {
@@ -419,6 +450,10 @@ async def createcontest(interaction: discord.Interaction, num_probs: int = 3, du
 @bot.tree.command(name="joincontest", description="Join a waiting contest")
 async def joincontest(interaction: discord.Interaction, contest_id: str):
     await interaction.response.defer()
+    user = await bot.db.users.find_one({"discord_id": interaction.user.id})
+    if not user:
+        await interaction.followup.send("❌ You must be registered first! Use `/register <handle>` to link your Codeforces account.")
+        return
     contest = await bot.db.contests.find_one({"contest_id": contest_id})
     if not contest:
         await interaction.followup.send("❌ Contest not found.")
@@ -453,7 +488,7 @@ async def startcontest(interaction: discord.Interaction, contest_id: str):
         return
     await bot.db.contests.update_one(
         {"contest_id": contest_id},
-        {"$set": {"status": "active", "start_time": datetime.utcnow()}}
+        {"$set": {"status": "active", "start_time": datetime.now(timezone.utc)}}
     )
     prob_links = "\n".join([f"🔗 [Problem {i+1}](https://codeforces.com/problemset/problem/{p.split('-')[0]}/{p.split('-')[1]})" for i, p in enumerate(contest['problems'])])
     await interaction.followup.send(f"🚀 **The Contest has STARTED!**\nDuration: {contest['duration']} mins\n\n**Problems:**\n{prob_links}\n\nGood luck everyone!")
