@@ -6,7 +6,60 @@ The bot follows an asynchronous event-driven architecture using `discord.py` and
 ### Core Philosophy: "ID-Only Storage"
 To remain within the MongoDB Atlas Free Tier limits, the bot never stores static data (problem statements, user ratings, etc.) that can be fetched from the API. It only stores **Identifiers (IDs)** and **Timestamps**.
 
-## 2. Data Models (MongoDB Collections)
+## 2. System Flow Diagrams
+
+### A. User Registration & Profile Flow
+```mermaid
+graph TD
+    A[User: /register handle] --> B{CF API: Valid?}
+    B -- No --> C[Error: Handle not found]
+    B -- Yes --> D[Store DiscordID -> CFHandle in DB]
+    D --> E[Success Message]
+    
+    F[User: /profile] --> G[Lookup handle in DB]
+    G --> H{Handle found?}
+    H -- No --> I[Error: Register first]
+    H -- Yes --> J[Fetch live stats from CF API]
+    J --> K[Display Embed with Rating/Rank]
+```
+
+### B. Practice & Submission Tracking Flow
+```mermaid
+graph TD
+    A[User: /randomquestion] --> B[Fetch Problem Set]
+    B --> C[Filter by Rating & Pick Random]
+    C --> D[Create Pending Session in DB]
+    D --> E[Send Problem Link]
+    
+    F[Background Poller] --> G{Session Pending?}
+    G -- Yes --> H{Expired > 1hr?}
+    H -- Yes --> I[Delete Session]
+    H -- No --> J[Fetch user.status from CF API]
+    J --> K{Verdict == 'OK'?}
+    K -- Yes --> L[Archive to User History]
+    L --> M[Delete Active Session]
+    M --> N[Post Victory Message]
+    K -- No --> O[Wait for next poll]
+```
+
+### C. Duel & Contest Lifecycle
+```mermaid
+graph TD
+    A[Creator: /challenge or /createcontest] --> B[Select Problems & Set Time]
+    B --> C[Status: WAITING]
+    C --> D[Participants Join via /joincontest]
+    D --> E[Admin: /startcontest]
+    E --> F[Status: ACTIVE]
+    F --> G[Reveal Problems to all]
+    G --> H[Poller tracks solve progress]
+    H --> I{Timer Expired or All Solved?}
+    I -- Yes --> J[Calculate Winner]
+    J --> K[Archive to Contest History]
+    K --> L[Delete Active Contest]
+    L --> M[Post Final Leaderboard]
+```
+
+## 3. Data Models (MongoDB Collections)
 
 ### `users`
 Stores the link between Discord and Codeforces.
@@ -40,20 +93,6 @@ The "Trophy Room" for solved problems.
 - `solved_at`: UTC timestamp.
 - `attempts`: Number of submissions.
 - `time_taken`: Seconds from assignment to solve.
-
-## 3. Competitive Logic (Duels & Contests)
-
-### The "Strict Start" Policy
-- **Invitations**: Participants are added to a `waiting` contest.
-- **Authority**: Only the `creator_id` can trigger the `/startcontest` command.
-- **Lock-in**: Once the status moves to `active`, no new participants can join.
-- **Reveal**: Problems are only revealed to participants at the moment the contest starts.
-
-### The Poller Workflow
-1. The bot scans `active_sessions` and `active` contests every 2 minutes.
-2. It fetches `user.status` from CF API for all active participants.
-3. It compares the submission verdict (`OK`) against the `problems` list in the contest blueprint.
-4. Real-time updates are pushed to the Discord channel upon solve detection.
 
 ## 4. Infrastructure & Scaling
 - **API Rate Limiting**: The bot uses a single `aiohttp.ClientSession` and minimizes requests by only polling active users.
